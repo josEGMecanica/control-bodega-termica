@@ -6,9 +6,12 @@ from datetime import datetime
 
 # --- 1. CONFIGURACIÓN DE CONEXIÓN ---
 def conectar_google_sheets():
+    # Esto lee directamente de los secretos que pegaste en Streamlit
+    creds_dict = st.secrets["gcp_service_account"]
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("llaves.json", scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
+    # Cambia esto al nombre de tu Excel real
     return client.open("Inventario_Bodega") # Asegúrate que este sea el nombre real
 
 sh = conectar_google_sheets()
