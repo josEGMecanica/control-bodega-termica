@@ -6,18 +6,22 @@ from datetime import datetime
 
 # --- 1. CONFIGURACIÓN DE CONEXIÓN ---
 def conectar_google_sheets():
-    # 1. Traemos los secretos
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    
-    # 2. LIMPIEZA CRUCIAL: Esto quita errores de formato en la llave
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-    
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-    
-    # Asegúrate de que este nombre sea el de tu Excel (image_131c2c.png)
-    return client.open("Inventario_Bodega") # Asegúrate que este sea el nombre real
+    # 1. Cargamos el diccionario de secretos
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        
+        # 2. Limpieza de la llave (el paso anterior que ya tenías)
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # IMPORTANTE: Asegúrate que el nombre del Excel sea este
+        return client.open("Inventario_Bodega")
+    except KeyError as e:
+        st.error(f"Falta una clave en los Secrets de Streamlit: {e}")
+        st.stop()
 
 sh = conectar_google_sheets()
 inv_sh = sh.worksheet("Inventario")
