@@ -3,123 +3,262 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 from datetime import datetime
+import requests
 
-# --- 1. CONFIGURACIÓN DE CONEXIÓN ---
-def conectar_google_sheets():
-    # 1. Cargamos el diccionario de secretos
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="Bodega PRO", layout="wide")
+
+TOKEN = st.secrets["telegram"]["token"]
+CHAT_ID = st.secrets["telegram"]["chat_id"]
+
+# ---------------- TELEGRAM ----------------
+def enviar_telegram(mensaje):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": mensaje}
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        
-        # 2. Limpieza de la llave (el paso anterior que ya tenías)
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        
-        # IMPORTANTE: Asegúrate que el nombre del Excel sea este
-        return client.open("Inventario_Bodega")
-    except KeyError as e:
-        st.error(f"Falta una clave en los Secrets de Streamlit: {e}")
-        st.stop()
+        requests.post(url, json=payload)
+    except:
+        pass
 
-sh = conectar_google_sheets()
-inv_sh = sh.worksheet("Inventario")
-mov_sh = sh.worksheet("Movimientos")
+# ---------------- GOOGLE SHEETS ----------------
+@st.cache_resource
+def conectar():
+    creds = dict(st.secrets["gcp_service_account"])
+    creds["private_key"] = creds["private_key"].replace("\\n", "\n")
 
-# --- 2. FUNCIONES DE LÓGICA ---
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
-def actualizar_stock(nombre_item, cantidad, operacion="restar"):
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds, scope)
+    client = gspread.authorize(creds)
+
+    return client.open("Inventario_Bodega")
+
+sh = conectar()
+inv = sh.worksheet("Inventario")
+mov = sh.worksheet("Movimientos")
+kits_sheet = sh.worksheet("Kits")
+
+# ---------------- CACHE ----------------
+@st.cache_data(ttl=60)
+def df_inv():
+    return pd.DataFrame(inv.get_all_records())
+
+@st.cache_data(ttl=60)
+def df_mov():
+    return pd.DataFrame(mov.get_all_records())
+
+@st.cache_data(ttl=60)
+def df_kits():
+    return pd.DataFrame(kits_sheet.get_all_records())
+
+@st.cache_data(ttl=60)
+def mapa_items():
+    df = df_inv()
+    return {row["Nombre"]: idx + 2 for idx, row in df.iterrows()}
+
+# ---------------- KITS ----------------
+def obtener_kits():
+    df = df_kits()
+    kits = {}
+
+    for _, row in df.iterrows():
+        kit = row["Nombre_Kit"]
+        item = row["Item"]
+        cant = int(row["Cantidad"])
+
+        if kit not in kits:
+            kits[kit] = {}
+
+        kits[kit][item] = cant
+
+    return kits
+
+# ---------------- FUNCIONES ----------------
+def update_stock(item, cant, op):
     try:
-        celda = inv_sh.find(nombre_item)
-        fila = celda.row
-        stock_actual = int(inv_sh.cell(fila, 4).value)
-        nuevo_stock = stock_actual - cantidad if operacion == "restar" else stock_actual + cantidad
-        inv_sh.update_cell(fila, 4, max(0, nuevo_stock))
-        return True
-    except: return False
+        mapa = mapa_items()
 
-# --- 3. INTERFAZ ---
-st.set_page_config(page_title="Control de Bodega", page_icon="🛠️", layout="wide")
+        if item not in mapa:
+            st.error(f"No existe el item: {item}")
+            return
 
-menu = st.sidebar.radio("Menú", ["📊 Dashboard / Inventario", "📤 Salida de Material", "📥 Devolución", "🆕 Registrar Nuevo Item"])
+        fila = mapa[item]
 
-# --- SECCIÓN: DASHBOARD ---
-if menu == "📊 Dashboard / Inventario":
-    st.header("Inventario Actual")
-    df_inv = pd.DataFrame(inv_sh.get_all_records())
-    st.dataframe(df_inv, use_container_width=True)
+        valor = inv.cell(fila, 4).value
+        stock = int(valor) if valor else 0
 
-# --- SECCIÓN: SALIDA (CON RESUMEN) ---
-elif menu == "📤 Salida de Material":
-    st.header("Registro de Salida")
-    
-    with st.form("form_salida"):
-        # Ahora el nombre es libre para escribir
-        trabajador = st.text_input("Nombre del Trabajador / Responsable")
-        destino = st.text_input("Lugar de Destino")
-        
-        # Cargar materiales del inventario
-        nombres_items = [row['Nombre'] for row in inv_sh.get_all_records()]
-        seleccion = st.multiselect("¿Qué cosas se llevan?", nombres_items)
-        cantidad = st.number_input("Cantidad de cada uno", min_value=1, value=1)
-        
-        enviar = st.form_submit_button("CONFIRMAR Y DESCONTAR")
-        
-        if enviar:
-            if not trabajador or not seleccion:
-                st.error("⚠️ Por favor escribe tu nombre y selecciona el material.")
-            else:
-                fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-                for item in seleccion:
-                    actualizar_stock(item, cantidad, "restar")
-                
-                # Guardar en Movimientos con estado PENDIENTE
-                mov_sh.append_row([fecha, trabajador, destino, str(seleccion), "Salida", "PENDIENTE"])
-                
-                # RESUMEN PARA EL USUARIO
-                st.success(f"✅ ¡Registro guardado exitosamente!")
-                st.balloons()
-                st.info(f"""
-                **RESUMEN DE SALIDA:**
-                * **Responsable:** {trabajador}
-                * **Materiales:** {', '.join(seleccion)}
-                * **Cantidad:** {cantidad} unidades c/u
-                * **Fecha/Hora:** {fecha}
-                """)
+        nuevo = stock - cant if op == "restar" else stock + cant
+        inv.update_cell(fila, 4, max(0, nuevo))
 
-# --- SECCIÓN: DEVOLUCIÓN (CON FLECHITA) ---
-elif menu == "📥 Devolución":
-    st.header("Retorno de Equipo")
-    data_mov = mov_sh.get_all_records()
-    
-    for i, mov in enumerate(data_mov):
-        fila_excel = i + 2
-        if mov.get('Estado_Retorno') == "PENDIENTE":
-            with st.expander(f"📦 {mov['Trabajador']} - {mov['Items_Llevados']}"):
-                if st.button("Confirmar Regreso ↩️", key=f"dev_{fila_excel}"):
-                    # Lógica de devolución
-                    items = mov['Items_Llevados'].replace("[", "").replace("]", "").replace("'", "").split(", ")
-                    for it in items:
-                        actualizar_stock(it.strip(), 1, "sumar")
-                    mov_sh.update_cell(fila_excel, 6, "DEVUELTO")
-                    st.rerun()
+    except Exception as e:
+        st.error(f"Error stock: {e}")
 
-# --- SECCIÓN: REGISTRAR NUEVO MATERIAL ---
-elif menu == "🆕 Registrar Nuevo Item":
-    st.header("Alta de Nuevo Material o Herramienta")
-    with st.form("nuevo_item"):
-        nuevo_id = st.text_input("ID del Producto (Ej: HER-05)")
-        nuevo_nombre = st.text_input("Nombre del Producto (Ej: Taladro Percutor)")
-        nuevo_tipo = st.selectbox("Categoría", ["Herramienta", "Material", "Consumible"])
-        nuevo_stock = st.number_input("Stock Inicial", min_value=0, value=0)
-        nueva_unidad = st.selectbox("Unidad", ["Pieza", "Metros", "Litros", "Juego"])
-        
-        btn_crear = st.form_submit_button("AGREGAR AL INVENTARIO")
-        
-        if btn_crear:
-            if nuevo_id and nuevo_nombre:
-                inv_sh.append_row([nuevo_id, nuevo_nombre, nuevo_tipo, nuevo_stock, nueva_unidad])
-                st.success(f"✨ '{nuevo_nombre}' ha sido agregado al inventario del Excel.")
-            else:
-                st.warning("Escribe el ID y el Nombre para continuar.")
+def registrar(data):
+    mov.append_row(data)
+
+# ---------------- UI ----------------
+menu = st.sidebar.radio("Menú", [
+    "Dashboard",
+    "Salida",
+    "Devoluciones",
+    "Historial",
+    "Kits"
+])
+
+# ---------------- DASHBOARD ----------------
+if menu == "Dashboard":
+    st.title("📊 Inventario")
+
+    df = df_inv()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Items", len(df))
+    col2.metric("Stock Total", df["Stock"].sum())
+
+    bajos = df[df["Stock"] < 5]
+    col3.metric("Bajo Stock", len(bajos))
+
+    if not bajos.empty:
+        st.warning("⚠️ Bajo stock detectado")
+        st.dataframe(bajos)
+
+        if "alerta_enviada" not in st.session_state:
+            mensaje = "⚠️ STOCK BAJO\n\n"
+            for _, row in bajos.iterrows():
+                mensaje += f"{row['Nombre']} ({row['Stock']})\n"
+
+            enviar_telegram(mensaje)
+            st.session_state.alerta_enviada = True
+
+    st.dataframe(df)
+
+# ---------------- SALIDA ----------------
+elif menu == "Salida":
+    st.title("📤 Salida")
+
+    df = df_inv()
+    items = df["Nombre"].tolist()
+
+    usuario = st.text_input("Responsable")
+    destino = st.text_input("Destino")
+
+    kits = obtener_kits()
+    kit_sel = st.selectbox("Seleccionar Kit", ["Ninguno"] + list(kits.keys()))
+
+    st.divider()
+    st.subheader("O seleccionar manual")
+
+    seleccion = st.multiselect("Items", items)
+
+    cantidades = {}
+    for i in seleccion:
+        cantidades[i] = st.number_input(f"{i}", min_value=1, key=i)
+
+    if st.button("Registrar salida"):
+
+        if not usuario or not destino:
+            st.warning("Faltan datos")
+            st.stop()
+
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+        resumen = []
+
+        # 🔥 USO DE KIT
+        if kit_sel != "Ninguno":
+            for item, cant in kits[kit_sel].items():
+                update_stock(item, cant, "restar")
+                resumen.append(f"{item}({cant})")
+
+        # 🔹 Manual
+        for i, c in cantidades.items():
+            update_stock(i, c, "restar")
+            resumen.append(f"{i}({c})")
+
+        registrar([
+            fecha,
+            usuario,
+            destino,
+            ", ".join(resumen),
+            "Salida",
+            "PENDIENTE"
+        ])
+
+        enviar_telegram(f"📤 SALIDA\nUsuario: {usuario}\nDestino: {destino}\nItems: {', '.join(resumen)}")
+
+        st.success("Salida registrada")
+        st.rerun()
+
+# ---------------- DEVOLUCIONES ----------------
+elif menu == "Devoluciones":
+    st.title("📥 Devoluciones")
+
+    df = df_mov()
+    pendientes = df[df["Estado_Retorno"] == "PENDIENTE"]
+
+    for idx, row in pendientes.iterrows():
+        with st.expander(f"{row['Items_Llevados']}"):
+
+            items = row["Items_Llevados"].split(", ")
+            dev = {}
+
+            for i in items:
+                if "(" not in i:
+                    continue
+
+                nombre = i.split("(")[0].strip()
+                dev[nombre] = st.number_input(nombre, min_value=1, key=f"{idx}_{nombre}")
+
+            if st.button("Devolver", key=idx):
+                for i, c in dev.items():
+                    update_stock(i, c, "sumar")
+
+                mov.update_cell(idx + 2, 6, "DEVUELTO")
+
+                enviar_telegram("📥 Devolución registrada")
+
+                st.success("Devuelto correctamente")
+                st.rerun()
+
+# ---------------- HISTORIAL ----------------
+elif menu == "Historial":
+    st.title("📜 Historial")
+    df = df_mov()
+    st.dataframe(df)
+
+# ---------------- CREAR KITS ----------------
+elif menu == "Kits":
+    st.title("🧰 Crear Kit")
+
+    nombre_kit = st.text_input("Nombre del Kit")
+
+    df = df_inv()
+    items = df["Nombre"].tolist()
+
+    seleccion = st.multiselect("Herramientas", items)
+
+    cantidades = {}
+    for i in seleccion:
+        cantidades[i] = st.number_input(f"{i}", min_value=1, key=f"kit_{i}")
+
+    if st.button("Guardar Kit"):
+
+        if not nombre_kit:
+            st.warning("Falta nombre del kit")
+            st.stop()
+
+        if not cantidades:
+            st.warning("Selecciona herramientas")
+            st.stop()
+
+        for item, cant in cantidades.items():
+            kits_sheet.append_row([
+                nombre_kit,
+                item,
+                cant
+            ])
+
+        st.success("Kit guardado correctamente")
+        st.rerun()
