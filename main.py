@@ -37,6 +37,7 @@ def conectar():
     return client.open("Inventario_Bodega")
 
 sh = conectar()
+st.write("✅ Conectado correctamente")
 inv = sh.worksheet("Inventario")
 mov = sh.worksheet("Movimientos")
 kits_sheet = sh.worksheet("Kits")
